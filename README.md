@@ -164,10 +164,3 @@ The server provides real-time events via Server-Sent Events (SSE):
 5. Run the test suite
 6. Submit a pull request
 
-## License
-
-[Add your license information here]
-
-## Support
-
-[Add support information here]
