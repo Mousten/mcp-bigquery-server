@@ -28,6 +28,18 @@ uv pip install -e ".[dev]"
 ## Configuration
 
 1. Copy the example environment file:
+
+```bash
+cp .env.example .env
+```
+
+2. Edit `.env` with your BigQuery project details:
+
+```bash
+PROJECT_ID=your-project-id
+LOCATION=US
+KEY_FILE=/path/to/your/service-account-key.json  # Optional
+```
 ```bash
 cp .env.example .env
 ```
@@ -64,6 +76,131 @@ import sys
 sys.argv = ['mcp-bigquery', '--transport', 'http', '--port', '8000']
 main()
 ```
+
+## Using with Claude Desktop
+
+To use this MCP BigQuery server with Claude Desktop, you need to configure it in your Claude Desktop configuration file.
+
+### 1. Install and Configure the Server
+
+First, ensure the server is installed and configured:
+
+```bash
+# Clone and install the server
+git clone <repository-url>
+cd mcp-bigquery-server
+uv venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+uv pip install -e ".[dev]"
+
+# Set up environment variables
+cp .env.example .env
+# Edit .env with your BigQuery project details
+```
+
+### 2. Configure Claude Desktop
+
+Add the server to your Claude Desktop configuration file:
+
+**Configuration file locations:**
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+
+#### For macOS/Linux:
+
+```json
+{
+  "mcpServers": {
+    "mcp-bigquery": {
+      "command": "/path/to/your/project/.venv/bin/mcp-bigquery",
+      "args": ["--transport", "stdio"],
+      "env": {
+        "PROJECT_ID": "your-project-id",
+        "LOCATION": "US",
+        "KEY_FILE": "/path/to/your/service-account-key.json"
+      }
+    }
+  }
+}
+```
+
+#### For Windows:
+
+```json
+{
+  "mcpServers": {
+    "mcp-bigquery": {
+      "command": "C:\\path\\to\\your\\project\\.venv\\Scripts\\mcp-bigquery.exe",
+      "args": ["--transport", "stdio"],
+      "env": {
+        "PROJECT_ID": "your-project-id",
+        "LOCATION": "US",
+        "KEY_FILE": "C:\\path\\to\\your\\service-account-key.json"
+      }
+    }
+  }
+}
+```
+
+#### Alternative Windows Configuration (using Python directly):
+
+```json
+{
+  "mcpServers": {
+    "mcp-bigquery": {
+      "command": "python",
+      "args": ["-m", "mcp_bigquery.main", "--transport", "stdio"],
+      "cwd": "C:\\path\\to\\your\\project",
+      "env": {
+        "PROJECT_ID": "your-project-id",
+        "LOCATION": "US",
+        "KEY_FILE": "C:\\path\\to\\your\\service-account-key.json"
+      }
+    }
+  }
+}
+```
+
+### 3. Authentication Setup
+
+Choose one of two authentication methods:
+
+**Option A: Service Account Key File**
+1. Create a service account in Google Cloud Console
+2. Download the JSON key file
+3. Set the `KEY_FILE` environment variable to the path of this file
+
+**Option B: Default Credentials**
+1. Install and configure Google Cloud SDK: `gcloud auth application-default login`
+2. Remove the `KEY_FILE` from the environment variables
+
+### 4. Restart Claude Desktop
+
+After saving the configuration file, restart Claude Desktop completely for the changes to take effect.
+
+### 5. Using the Server
+
+Once configured, you can interact with your BigQuery data through Claude Desktop:
+
+- "What datasets do I have available in BigQuery?"
+- "Show me the schema for the [dataset].[table] table"
+- "Run a query to get the first 10 rows from [dataset].[table]"
+
+The server provides these tools to Claude:
+- `execute_bigquery_sql` - Execute read-only SQL queries
+- `get_datasets` - List all datasets
+- `get_tables` - Get tables in a dataset
+- `get_table_schema` - Get detailed table schema
+
+### Troubleshooting
+
+If the server doesn't connect:
+
+1. **Check the logs**: Claude Desktop shows error messages if the server fails to start
+2. **Verify paths**: Ensure all file paths in the configuration are correct and accessible
+3. **Test standalone**: Run `mcp-bigquery --transport stdio` in your terminal to check for errors
+4. **Check permissions**: Ensure your service account has BigQuery Data Viewer and BigQuery Job User permissions
+5. **Windows path format**: Use double backslashes (`\\`) and include the `.exe` extension
 
 ## API Endpoints
 
@@ -163,4 +300,3 @@ The server provides real-time events via Server-Sent Events (SSE):
 4. Add tests for new functionality
 5. Run the test suite
 6. Submit a pull request
-
