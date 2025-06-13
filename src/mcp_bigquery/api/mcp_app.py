@@ -7,6 +7,7 @@ from ..handlers.tools import (
     get_tables_handler,
     get_table_schema_handler,
 )
+from ..core.supabase_client import SupabaseKnowledgeBase
 
 
 def create_mcp_app(bigquery_client, config, event_manager) -> FastMCP:
@@ -15,6 +16,12 @@ def create_mcp_app(bigquery_client, config, event_manager) -> FastMCP:
         name="mcp-bigquery-server",
         version="0.1.0",
         description="A FastMCP server for securely accessing BigQuery datasets with support for HTTP and Stdio transport.",
+    )
+
+    # Instantiate the Supabase knowledge base
+    knowledge_base = SupabaseKnowledgeBase(
+        supabase_url=config.SUPABASE_URL,
+        supabase_key=config.SUPABASE_ANON_KEY,
     )
 
     @mcp_app.resource("resources://list")
@@ -45,7 +52,7 @@ def create_mcp_app(bigquery_client, config, event_manager) -> FastMCP:
     ) -> dict:
         """Execute a read-only SQL query on BigQuery."""
         result = await query_tool_handler(
-            bigquery_client, event_manager, sql, maximum_bytes_billed
+            bigquery_client, event_manager, sql, maximum_bytes_billed, knowledge_base=knowledge_base
         )
         if isinstance(result, tuple):
             result, _ = result
