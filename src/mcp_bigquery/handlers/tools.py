@@ -26,7 +26,7 @@ async def query_tool_handler(
     bigquery_client,
     event_manager,
     sql: str,
-    maximum_bytes_billed: int = 1000000000,
+    maximum_bytes_billed: int = 100000000,
     knowledge_base: Optional[SupabaseKnowledgeBase] = None,
     use_cache: bool = True,
     user_id: Optional[str] = None,
@@ -125,6 +125,18 @@ async def query_tool_handler(
                     sql, statistics, tables_accessed, True, user_id=user_id
                 )
 
+                # Check if this query is already a template
+                existing_templates = await knowledge_base.get_query_suggestions(tables_accessed, limit=100)
+                if not any(t["template_sql"].strip().lower() == sql.strip().lower() for t in existing_templates):
+                    await knowledge_base.save_query_template(
+                        name=f"Auto Template {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                        description="Auto-saved from successful user query.",
+                        template_sql=sql,
+                        parameters=[],  # Optionally extract parameters
+                        tags=["auto", "user"],
+                        user_id=user_id
+                    )
+
             await event_manager.broadcast(
                 "queries",
                 "query_complete",
@@ -134,6 +146,9 @@ async def query_tool_handler(
                     "statistics": statistics,
                 },
             )
+
+            if knowledge_base is not None and user_id:
+                await knowledge_base.increment_common_request(sql)
 
             return {
                 "content": [
@@ -315,6 +330,8 @@ async def explain_table_handler(
         column_docs = await knowledge_base.get_column_documentation(
             project_id, dataset_id, table_id
         )
+        if column_docs is None:
+            column_docs = {}
         
         # Get schema history
         try:

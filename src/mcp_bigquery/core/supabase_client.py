@@ -136,12 +136,22 @@ class SupabaseKnowledgeBase:
         expires_at = datetime.now() + timedelta(hours=ttl_hours)
         
         try:
-            # Prepare cache entry data
+            def serialize_for_json(obj):
+                if isinstance(obj, (datetime, )):
+                    return obj.isoformat()
+                if hasattr(obj, 'isoformat'):
+                    return obj.isoformat()
+                return obj
+
+            # Deep copy to avoid mutating original data
+            result_data_serialized = json.loads(json.dumps(result_data, default=serialize_for_json))
+            metadata_serialized = json.loads(json.dumps(metadata, default=serialize_for_json))
+
             cache_data = {
                 "query_hash": query_hash,
                 "sql_query": sql,
-                "result_data": result_data,
-                "metadata": metadata,
+                "result_data": result_data_serialized,
+                "metadata": metadata_serialized,
                 "expires_at": expires_at.isoformat(),
                 "hit_count": 0
             }
@@ -370,3 +380,101 @@ class SupabaseKnowledgeBase:
         except Exception as e:
             print(f"Error fetching column documentation: {e}")
             return None
+
+    async def save_query_template(
+        self,
+        name: str,
+        description: str,
+        template_sql: str,
+        parameters: list,
+        tags: list,
+        user_id: Optional[str] = None
+    ) -> bool:
+        """Save a query template to Supabase."""
+        if not await self.verify_connection():
+            return False
+        try:
+            template_data = {
+                "name": name,
+                "description": description,
+                "template_sql": template_sql,
+                "parameters": parameters,
+                "tags": tags,
+                "usage_count": 1,
+            }
+            if user_id:
+                template_data["user_id"] = user_id
+            self.supabase.table("query_templates").insert(template_data).execute()
+            return True
+        except Exception as e:
+            print(f"Error saving query template: {e}")
+            return False
+
+    async def get_user_preferences(self, user_id: str) -> Optional[dict]:
+        """Retrieve user preferences from Supabase."""
+        if not await self.verify_connection():
+            return None
+        try:
+            result = self.supabase.table("user_preferences").select("*").eq("user_id", user_id).limit(1).execute()
+            if result.data:
+                return result.data[0]
+            return None
+        except Exception as e:
+            print(f"Error fetching user preferences: {e}")
+            return None
+
+    async def set_user_preferences(self, user_id: str, preferences: dict) -> bool:
+        """Set or update user preferences in Supabase."""
+        if not await self.verify_connection():
+            return False
+        try:
+            # Upsert (insert or update)
+            self.supabase.table("user_preferences").upsert({
+                "user_id": user_id,
+                "preferences": preferences
+            }).execute()
+            return True
+        except Exception as e:
+            print(f"Error setting user preferences: {e}")
+            return False
+
+    async def increment_common_request(self, sql: str) -> None:
+        """Increment a counter for common requests."""
+        if not await self.verify_connection():
+            return
+        try:
+            # Use a hash of the SQL as the key
+            sql_hash = self._generate_query_hash(sql)
+            result = self.supabase.table("common_requests").select("*").eq("sql_hash", sql_hash).limit(1).execute()
+            if result.data:
+                # Update count
+                self.supabase.table("common_requests").update({
+                    "count": result.data[0]["count"] + 1
+                }).eq("sql_hash", sql_hash).execute()
+            else:
+                # Insert new
+                self.supabase.table("common_requests").insert({
+                    "sql_hash": sql_hash,
+                    "sql_query": sql,
+                    "count": 1
+                }).execute()
+        except Exception as e:
+            print(f"Error incrementing common request: {e}")
+
+    async def invalidate_cache_for_table(
+        self, project_id: str, dataset_id: str, table_id: str
+    ) -> bool:
+        """
+        Invalidate (delete) all cached queries related to a specific table.
+        """
+        try:
+            response = self.supabase.table("query_cache") \
+                .delete() \
+                .eq("project_id", project_id) \
+                .eq("dataset_id", dataset_id) \
+                .eq("table_id", table_id) \
+                .execute()
+            return True
+        except Exception as e:
+            print(f"Error invalidating cache for table: {e}")
+            return False

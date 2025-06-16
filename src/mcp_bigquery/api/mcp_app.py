@@ -600,4 +600,36 @@ def create_mcp_app(bigquery_client, config, event_manager) -> FastMCP:
             )
             raise
 
+    @mcp_app.tool(
+        name="get_user_preferences",
+        description="Get user preferences from Supabase. If user_id is not provided, uses 'anonymous' or session id."
+    )
+    async def get_user_preferences(user_id: Optional[str] = None, session_id: Optional[str] = None) -> dict:
+        effective_user_id = user_id or session_id or "anonymous"
+        if not await ensure_supabase_connection():
+            return {"error": "Supabase unavailable"}
+        try:
+            assert knowledge_base is not None
+            prefs = await knowledge_base.get_user_preferences(effective_user_id)
+            return {"user_id": effective_user_id, "preferences": prefs}
+        except Exception as e:
+            logger.error(f"Error getting user preferences: {e}")
+            return {"error": str(e)}
+
+    @mcp_app.tool(
+        name="set_user_preferences",
+        description="Set or update user preferences in Supabase. If user_id is not provided, uses 'anonymous' or session id."
+    )
+    async def set_user_preferences(preferences: dict, user_id: Optional[str] = None, session_id: Optional[str] = None) -> dict:
+        effective_user_id = user_id or session_id or "anonymous"
+        if not await ensure_supabase_connection():
+            return {"error": "Supabase unavailable"}
+        try:
+            assert knowledge_base is not None
+            ok = await knowledge_base.set_user_preferences(effective_user_id, preferences)
+            return {"user_id": effective_user_id, "success": ok}
+        except Exception as e:
+            logger.error(f"Error setting user preferences: {e}")
+            return {"error": str(e)}
+
     return mcp_app
