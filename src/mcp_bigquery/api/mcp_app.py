@@ -241,17 +241,18 @@ def create_mcp_app(bigquery_client, config, event_manager) -> FastMCP:
             if await ensure_supabase_connection() and result and "tables" in result:
                 project_id = getattr(config, 'PROJECT_ID', 'unknown')
                 for table in result["tables"]:
+                    docs = None  # Ensure docs is always defined
                     try:
                         if knowledge_base is not None:
                             docs = await knowledge_base.get_column_documentation(
-                            project_id=project_id,
-                            dataset_id=dataset_id,
-                            table_id=table.get("table_id")
-                        )
-                        if docs:
-                            table["column_documentation"] = docs
+                                project_id=project_id,
+                                dataset_id=dataset_id,
+                                table_id=table.get("table_id")
+                            )
                     except Exception as e:
                         logger.debug(f"Failed to get column documentation for {table.get('table_id')}: {e}")
+                    if docs:
+                        table["column_documentation"] = docs
             
             await log_supabase_event(
                 "tables_list",
@@ -284,20 +285,20 @@ def create_mcp_app(bigquery_client, config, event_manager) -> FastMCP:
                 result, _ = result
             
             # Add documentation if requested and available
+            docs = None  # Ensure docs is always defined
             if include_documentation and result and await ensure_supabase_connection():
                 project_id = getattr(config, 'PROJECT_ID', 'unknown')
                 try:
-                    if knowledge_base is not None:  # <-- Add this guard
-                        if knowledge_base is not None:
-                            docs = await knowledge_base.get_column_documentation(
+                    if knowledge_base is not None:
+                        docs = await knowledge_base.get_column_documentation(
                             project_id=project_id,
                             dataset_id=dataset_id,
                             table_id=table_id
                         )
-                        if docs:
-                            result["column_documentation"] = docs
                 except Exception as e:
                     logger.debug(f"Failed to get column documentation: {e}")
+                if docs:
+                    result["column_documentation"] = docs
             
             await log_supabase_event(
                 "schema_access",
@@ -330,19 +331,20 @@ def create_mcp_app(bigquery_client, config, event_manager) -> FastMCP:
         user_id: Optional[str] = None
     ) -> dict:
         effective_user_id = user_id or getattr(config, 'DEFAULT_USER_ID', None)
-        
+        supabase_available = await ensure_supabase_connection()
+        if not (await ensure_supabase_connection() and knowledge_base is not None):
+            return {"error": "Supabase knowledge base unavailable"}
         try:
-            assert knowledge_base is not None
             result = await get_query_suggestions_handler(
                 bigquery_client=bigquery_client,
-                knowledge_base=knowledge_base if await ensure_supabase_connection() else None,
+                knowledge_base=knowledge_base,
                 tables_mentioned=tables_mentioned,
                 query_context=query_context,
                 limit=limit
             )
             if isinstance(result, tuple):
                 result, _ = result
-            
+
             await log_supabase_event(
                 "query_suggestions",
                 {
@@ -374,19 +376,22 @@ def create_mcp_app(bigquery_client, config, event_manager) -> FastMCP:
         user_id: Optional[str] = None
     ) -> dict:
         effective_user_id = user_id or getattr(config, 'DEFAULT_USER_ID', None)
-        
+
+        supabase_available = await ensure_supabase_connection()
+        if not (supabase_available and knowledge_base is not None):
+            return {"error": "Supabase knowledge base unavailable"}
+
         try:
-            assert knowledge_base is not None
             result = await explain_table_handler(
                 bigquery_client=bigquery_client,
-                knowledge_base=knowledge_base if await ensure_supabase_connection() else None,
+                knowledge_base=knowledge_base,
                 project_id=project_id,
                 dataset_id=dataset_id,
                 table_id=table_id
             )
             if isinstance(result, tuple):
                 result, _ = result
-            
+
             await log_supabase_event(
                 "table_explanation",
                 {
@@ -420,10 +425,13 @@ def create_mcp_app(bigquery_client, config, event_manager) -> FastMCP:
     ) -> dict:
         effective_user_id = user_id or getattr(config, 'DEFAULT_USER_ID', None)
         
+        supabase_available = await ensure_supabase_connection()
+        if not (supabase_available and knowledge_base is not None):
+            return {"error": "Supabase knowledge base unavailable"}
+
         try:
-            assert knowledge_base is not None
             result = await analyze_query_performance_handler(
-                knowledge_base=knowledge_base if await ensure_supabase_connection() else None,
+                knowledge_base=knowledge_base,
                 sql=sql,
                 tables_accessed=tables_accessed,
                 time_range_hours=time_range_hours,
@@ -469,7 +477,7 @@ def create_mcp_app(bigquery_client, config, event_manager) -> FastMCP:
         try:
             assert knowledge_base is not None
             result = await get_schema_changes_handler(
-                knowledge_base=knowledge_base if await ensure_supabase_connection() else None,
+                knowledge_base=knowledge_base,
                 project_id=project_id,
                 dataset_id=dataset_id,
                 table_id=table_id,
@@ -512,20 +520,23 @@ def create_mcp_app(bigquery_client, config, event_manager) -> FastMCP:
         user_id: Optional[str] = None
     ) -> dict:
         effective_user_id = user_id or getattr(config, 'DEFAULT_USER_ID', None)
-        
+
+        supabase_available = await ensure_supabase_connection()
+        if not (supabase_available and knowledge_base is not None):
+            return {"error": "Supabase knowledge base unavailable"}
+
         try:
             result = await cache_management_handler(
-                knowledge_base=knowledge_base if await ensure_supabase_connection() else None,
+                knowledge_base=knowledge_base,
                 action=action,
                 target=target,
                 project_id=project_id,
                 dataset_id=dataset_id,
-                table_id=table_id,
-                user_id=effective_user_id
+                table_id=table_id
             )
             if isinstance(result, tuple):
                 result, _ = result
-            
+
             await log_supabase_event(
                 "cache_management",
                 {
