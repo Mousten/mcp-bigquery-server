@@ -344,3 +344,29 @@ class SupabaseKnowledgeBase:
             print(f"Error cleaning up expired cache: {e}")
         
         return 0
+
+    async def get_column_documentation(
+        self,
+        project_id: str,
+        dataset_id: str,
+        table_id: str
+    ) -> Optional[dict]:
+        """
+        Retrieve column documentation for a given table from Supabase.
+        """
+        if not await self.verify_connection():
+            return None
+        try:
+            result = self.supabase.table("column_documentation") \
+                .select("*") \
+                .eq("project_id", project_id) \
+                .eq("dataset_id", dataset_id) \
+                .eq("table_id", table_id) \
+                .limit(1) \
+                .execute()
+            if result.data:
+                return result.data[0]
+            return None
+        except Exception as e:
+            print(f"Error fetching column documentation: {e}")
+            return None
