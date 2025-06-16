@@ -56,7 +56,7 @@ SUPABASE_ANON_KEY=your-anon-key  # Alternative with RLS
 
 ### Supabase Setup
 
-For enhanced caching and analytics features, you'll need a Supabase project with the following tables:
+For enhanced caching and analytics features, you'll need a Supabase project with the following tables and policies.  
 
 - `query_cache` - Stores cached query results
 - `table_dependencies` - Tracks table dependencies for cache invalidation
@@ -64,6 +64,204 @@ For enhanced caching and analytics features, you'll need a Supabase project with
 - `query_templates` - Reusable query templates
 - `column_documentation` - Business context for table columns
 - `event_log` - System event tracking
+
+**Run these SQL queries in your Supabase SQL editor to set up the schema:**
+
+```sql
+-- Enable UUID extension
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- 1. Query Result Caching Tables
+CREATE TABLE query_cache (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  query_hash TEXT UNIQUE NOT NULL,
+  sql_query TEXT NOT NULL,
+  result_data JSONB NOT NULL,
+  metadata JSONB NOT NULL, -- bytes processed, execution time, etc.
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+  hit_count INTEGER DEFAULT 0
+);
+
+-- Indexes for query_cache
+CREATE INDEX idx_query_cache_hash ON query_cache(query_hash);
+CREATE INDEX idx_query_cache_expires ON query_cache(expires_at);
+CREATE INDEX idx_query_cache_created ON query_cache(created_at);
+
+CREATE TABLE table_dependencies (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  query_cache_id UUID REFERENCES query_cache(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL,
+  dataset_id TEXT NOT NULL,
+  table_id TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for table_dependencies
+CREATE INDEX idx_table_deps_lookup ON table_dependencies(project_id, dataset_id, table_id);
+CREATE INDEX idx_table_deps_cache ON table_dependencies(query_cache_id);
+
+-- 2. Schema Evolution & Knowledge Base Tables
+CREATE TABLE schema_snapshots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id TEXT NOT NULL,
+  dataset_id TEXT NOT NULL,
+  table_id TEXT NOT NULL,
+  schema_version INTEGER NOT NULL DEFAULT 1,
+  schema_data JSONB NOT NULL,
+  row_count BIGINT,
+  size_bytes BIGINT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for schema_snapshots
+CREATE UNIQUE INDEX idx_schema_version ON schema_snapshots(project_id, dataset_id, table_id, schema_version);
+CREATE INDEX idx_schema_table ON schema_snapshots(project_id, dataset_id, table_id);
+
+CREATE TABLE column_documentation (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id TEXT NOT NULL,
+  dataset_id TEXT NOT NULL,
+  table_id TEXT NOT NULL,
+  column_name TEXT NOT NULL,
+  description TEXT,
+  business_rules TEXT[],
+  sample_values JSONB,
+  data_quality_notes TEXT,
+  updated_by TEXT,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for column_documentation
+CREATE UNIQUE INDEX idx_column_docs_unique ON column_documentation(project_id, dataset_id, table_id, column_name);
+CREATE INDEX idx_column_docs_table ON column_documentation(project_id, dataset_id, table_id);
+
+-- 3. Query Analytics & Pattern Recognition Tables
+CREATE TABLE query_history (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id TEXT,
+  sql_query TEXT NOT NULL,
+  execution_time_ms INTEGER,
+  bytes_processed BIGINT,
+  success BOOLEAN NOT NULL,
+  error_message TEXT,
+  tables_accessed TEXT[],
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for query_history
+CREATE INDEX idx_query_history_user ON query_history(user_id);
+CREATE INDEX idx_query_history_success ON query_history(success);
+CREATE INDEX idx_query_history_created ON query_history(created_at);
+CREATE INDEX idx_query_history_tables ON query_history USING GIN(tables_accessed);
+
+CREATE TABLE query_templates (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  description TEXT,
+  template_sql TEXT NOT NULL,
+  parameters JSONB NOT NULL DEFAULT '{}',
+  usage_count INTEGER DEFAULT 0,
+  tags TEXT[],
+  created_by TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for query_templates
+CREATE INDEX idx_query_templates_usage ON query_templates(usage_count DESC);
+CREATE INDEX idx_query_templates_tags ON query_templates USING GIN(tags);
+
+-- 4. Real-time Event Tracking
+CREATE TABLE event_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_type TEXT NOT NULL,
+  event_data JSONB NOT NULL,
+  user_id TEXT,
+  session_id TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for event_log
+CREATE INDEX idx_event_log_type ON event_log(event_type);
+CREATE INDEX idx_event_log_user ON event_log(user_id);
+CREATE INDEX idx_event_log_session ON event_log(session_id);
+CREATE INDEX idx_event_log_created ON event_log(created_at);
+
+-- 5. User Preferences & Settings
+CREATE TABLE user_preferences (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id TEXT UNIQUE NOT NULL,
+  preferences JSONB NOT NULL DEFAULT '{}',
+  query_defaults JSONB NOT NULL DEFAULT '{}',
+  favorite_queries UUID[] DEFAULT '{}',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Row Level Security (RLS) Policies
+ALTER TABLE query_cache ENABLE ROW LEVEL SECURITY;
+ALTER TABLE table_dependencies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE schema_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE column_documentation ENABLE ROW LEVEL SECURITY;
+ALTER TABLE query_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE query_templates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE event_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_preferences ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies (customize as needed)
+-- CREATE POLICY "Enable read access for authenticated users" ON query_cache
+--     FOR SELECT USING (auth.role() = 'authenticated');
+
+-- CREATE POLICY "Enable all operations for authenticated users" ON query_history
+--     FOR ALL USING (auth.role() = 'authenticated');
+
+-- CREATE POLICY "Users can manage their own preferences" ON user_preferences
+--     FOR ALL USING (auth.uid()::text = user_id);
+
+-- Triggers for automatic timestamp updates
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER update_column_documentation_updated_at
+    BEFORE UPDATE ON column_documentation
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_query_templates_updated_at
+    BEFORE UPDATE ON query_templates
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_user_preferences_updated_at
+    BEFORE UPDATE ON user_preferences
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Cache Cleanup Function
+CREATE OR REPLACE FUNCTION cleanup_expired_cache()
+RETURNS INTEGER AS $$
+DECLARE
+    deleted_count INTEGER;
+BEGIN
+    DELETE FROM query_cache WHERE expires_at < NOW();
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    RETURN deleted_count;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+**These tables enable:**
+- Query result caching and dependency tracking
+- Schema evolution and documentation
+- Query analytics and pattern recognition
+- Real-time event logging
+- User preferences and settings
+
+**Row Level Security (RLS)** is enabled for all tables.  
+Customize the RLS policies as needed for your environment.
 
 The server will work without Supabase but with limited functionality.
 
