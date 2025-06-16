@@ -1,60 +1,118 @@
-"""Supabase client for caching and knowledge base functionality."""
+"""Enhanced Supabase client for caching and knowledge base functionality with RLS support."""
 import os
 import hashlib
 import json
+import asyncio
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 from supabase import create_client, Client
+    # Import APIError at the top
+from postgrest.exceptions import APIError
 from ..core.json_encoder import CustomJSONEncoder
 
 
 class SupabaseKnowledgeBase:
-    """Supabase-backed knowledge base and caching layer."""
+    """Enhanced Supabase-backed knowledge base and caching layer with RLS support."""
 
-    def __init__(self):
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_ANON_KEY")
-        if not supabase_url or not supabase_key:
-            raise ValueError("SUPABASE_URL and SUPABASE_ANON_KEY must be set in environment variables.")
-        self.supabase: Client = create_client(
-            str(supabase_url),
-            str(supabase_key)
+    def __init__(self, supabase_url: Optional[str] = None, supabase_key: Optional[str] = None):
+        """Initialize the Supabase client."""
+        self.supabase_url = supabase_url or os.getenv("SUPABASE_URL")
+        # Try to use service role key first, then anon key
+        self.supabase_key = (
+            supabase_key or 
+            os.getenv("SUPABASE_SERVICE_KEY") or 
+            os.getenv("SUPABASE_ANON_KEY")
         )
+        
+        if not self.supabase_url or not self.supabase_key:
+            raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_KEY (or SUPABASE_ANON_KEY) must be provided or set in environment variables.")
+        
+        self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
+        self._connection_verified = False
+        self._use_service_key = bool(os.getenv("SUPABASE_SERVICE_KEY"))
+    
+    async def verify_connection(self) -> bool:
+        """Verify the Supabase connection and schema."""
+        if self._connection_verified:
+            return True
+            
+        try:
+            # Test connection by checking if query_cache table exists
+            result = self.supabase.table("query_cache").select("count", count="exact").limit(1).execute()
+            self._connection_verified = True
+            print(f"✅ Supabase connection verified. Using {'service key' if self._use_service_key else 'anon key'}")
+            return True
+        except Exception as e:
+            print(f"❌ Supabase connection verification failed: {e}")
+            return False
     
     def _generate_query_hash(self, sql: str, params: Optional[Dict[str, Any]] = None) -> str:
         """Generate a unique hash for a query."""
-        query_string = sql.strip().lower()
+        # Normalize SQL: remove extra whitespace, convert to lowercase
+        normalized_sql = " ".join(sql.strip().lower().split())
+        query_string = normalized_sql
+        
         if params:
-            query_string += json.dumps(params, sort_keys=True)
+            query_string += json.dumps(params, sort_keys=True, cls=CustomJSONEncoder)
+        
         return hashlib.sha256(query_string.encode()).hexdigest()
     
-    async def get_cached_query(self, sql: str, max_age_hours: int = 24) -> Optional[Dict[str, Any]]:
+    async def get_cached_query(
+        self, 
+        sql: str, 
+        max_age_hours: int = 24,
+        use_cache: bool = True,
+        user_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         """Retrieve cached query result if available and not expired."""
+        if not use_cache or not await self.verify_connection():
+            return None
+            
         query_hash = self._generate_query_hash(sql)
         
         try:
-            result = self.supabase.table("query_cache").select("*").eq(
+            query = self.supabase.table("query_cache").select("*").eq(
                 "query_hash", query_hash
             ).gte(
                 "expires_at", datetime.now().isoformat()
-            ).execute()
+            ).order("created_at", desc=True).limit(1)
+            
+            # Add user filter if using user-based RLS
+            if user_id and not self._use_service_key:
+                query = query.eq("user_id", user_id)
+            
+            result = query.execute()
             
             if result.data:
-                # Update hit count
-                self.supabase.table("query_cache").update({
-                    "hit_count": result.data[0]["hit_count"] + 1
-                }).eq("id", result.data[0]["id"]).execute()
+                cache_entry = result.data[0]
+                
+                # Update hit count asynchronously
+                asyncio.create_task(self._update_cache_hit_count(cache_entry["id"]))
                 
                 return {
                     "cached": True,
-                    "result": result.data[0]["result_data"],
-                    "metadata": result.data[0]["metadata"],
-                    "cached_at": result.data[0]["created_at"]
+                    "result": cache_entry["result_data"],
+                    "metadata": cache_entry["metadata"],
+                    "cached_at": cache_entry["created_at"],
+                    "cache_id": cache_entry["id"]
                 }
         except Exception as e:
             print(f"Error retrieving cached query: {e}")
         
         return None
+    
+    async def _update_cache_hit_count(self, cache_id: str) -> None:
+        """Update the hit count for a cache entry."""
+        try:
+            # Get current hit count first
+            current_result = self.supabase.table("query_cache").select("hit_count").eq("id", cache_id).execute()
+            if current_result.data:
+                current_count = current_result.data[0]["hit_count"] or 0
+                self.supabase.table("query_cache").update({
+                    "hit_count": current_count + 1
+                }).eq("id", cache_id).execute()
+        except Exception as e:
+            print(f"Error updating cache hit count: {e}")
     
     async def cache_query_result(
         self, 
@@ -62,135 +120,98 @@ class SupabaseKnowledgeBase:
         result_data: List[Dict[str, Any]], 
         metadata: Dict[str, Any],
         tables_accessed: List[str],
-        ttl_hours: int = 24
+        ttl_hours: int = 24,
+        use_cache: bool = True,
+        user_id: Optional[str] = None
     ) -> bool:
         """Cache query result with metadata and table dependencies."""
+        if not use_cache or not await self.verify_connection():
+            return False
+            
+        # Don't cache empty results or very large results
+        if not result_data or len(result_data) > 10000:
+            return False
+            
         query_hash = self._generate_query_hash(sql)
         expires_at = datetime.now() + timedelta(hours=ttl_hours)
         
         try:
-            # Insert cache entry
-            cache_result = self.supabase.table("query_cache").insert({
+            # Prepare cache entry data
+            cache_data = {
                 "query_hash": query_hash,
                 "sql_query": sql,
                 "result_data": result_data,
                 "metadata": metadata,
-                "expires_at": expires_at.isoformat()
-            }).execute()
+                "expires_at": expires_at.isoformat(),
+                "hit_count": 0
+            }
+            
+            # Add user_id if provided
+            if user_id:
+                cache_data["user_id"] = user_id
+            
+            # Insert cache entry
+            cache_result = self.supabase.table("query_cache").insert(cache_data).execute()
             
             if cache_result.data:
                 cache_id = cache_result.data[0]["id"]
                 
                 # Insert table dependencies
-                dependencies = []
-                for table_path in tables_accessed:
-                    parts = table_path.split(".")
-                    if len(parts) >= 2:
-                        dependencies.append({
-                            "query_cache_id": cache_id,
-                            "project_id": parts[0] if len(parts) == 3 else metadata.get("project_id"),
-                            "dataset_id": parts[-2],
-                            "table_id": parts[-1]
-                        })
+                await self._insert_table_dependencies(cache_id, tables_accessed, metadata)
                 
-                if dependencies:
-                    self.supabase.table("table_dependencies").insert(dependencies).execute()
-                
+                print(f"✅ Cached query result with {len(result_data)} rows, expires at {expires_at}")
                 return True
                 
+        except APIError as e:
+            print(f"❌ Error caching query result: {e}")
+            # Log API error details for debugging
+            if hasattr(e, 'details') and e.details:
+                print(f"API Error details: {e.details}")
+            if hasattr(e, 'hint') and e.hint:
+                print(f"API Error hint: {e.hint}")
         except Exception as e:
-            print(f"Error caching query result: {e}")
+            print(f"❌ Error caching query result: {e}")
         
         return False
     
-    async def invalidate_cache_for_table(self, project_id: str, dataset_id: str, table_id: str):
-        """Invalidate all cached queries that depend on a specific table."""
-        try:
-            # Find all cache entries that depend on this table
-            deps_result = self.supabase.table("table_dependencies").select(
-                "query_cache_id"
-            ).eq("project_id", project_id).eq("dataset_id", dataset_id).eq("table_id", table_id).execute()
-            
-            if deps_result.data:
-                cache_ids = [dep["query_cache_id"] for dep in deps_result.data]
-                
-                # Set expiration to now for these cache entries
-                self.supabase.table("query_cache").update({
-                    "expires_at": datetime.now().isoformat()
-                }).in_("id", cache_ids).execute()
-                
-                print(f"Invalidated {len(cache_ids)} cached queries for {project_id}.{dataset_id}.{table_id}")
-                
-        except Exception as e:
-            print(f"Error invalidating cache: {e}")
-    
-    async def track_schema_change(
+    async def _insert_table_dependencies(
         self, 
-        project_id: str, 
-        dataset_id: str, 
-        table_id: str, 
-        new_schema: List[Dict[str, Any]],
+        cache_id: str, 
+        tables_accessed: List[str], 
         metadata: Dict[str, Any]
-    ) -> bool:
-        """Track schema changes and automatically invalidate affected cache entries."""
-        try:
-            # Get current schema version
-            current_result = self.supabase.table("schema_snapshots").select(
-                "schema_version"
-            ).eq("project_id", project_id).eq("dataset_id", dataset_id).eq("table_id", table_id).order(
-                "schema_version", desc=True
-            ).limit(1).execute()
+    ) -> None:
+        """Insert table dependencies for cache invalidation."""
+        if not tables_accessed:
+            return
             
-            next_version = 1
-            if current_result.data:
-                next_version = current_result.data[0]["schema_version"] + 1
-            
-            # Insert new schema snapshot
-            self.supabase.table("schema_snapshots").insert({
-                "project_id": project_id,
-                "dataset_id": dataset_id,
-                "table_id": table_id,
-                "schema_version": next_version,
-                "schema_data": new_schema,
-                "row_count": metadata.get("num_rows"),
-                "size_bytes": metadata.get("num_bytes")
-            }).execute()
-            
-            # Invalidate related cache entries
-            await self.invalidate_cache_for_table(project_id, dataset_id, table_id)
-            
-            return True
-            
-        except Exception as e:
-            print(f"Error tracking schema change: {e}")
-            return False
-    
-    async def get_column_documentation(
-        self, 
-        project_id: str, 
-        dataset_id: str, 
-        table_id: str
-    ) -> Dict[str, Dict[str, Any]]:
-        """Get documentation for all columns in a table."""
-        try:
-            result = self.supabase.table("column_documentation").select("*").eq(
-                "project_id", project_id
-            ).eq("dataset_id", dataset_id).eq("table_id", table_id).execute()
-            
-            docs = {}
-            for doc in result.data:
-                docs[doc["column_name"]] = {
-                    "description": doc["description"],
-                    "business_rules": doc["business_rules"],
-                    "sample_values": doc["sample_values"],
-                    "data_quality_notes": doc["data_quality_notes"]
-                }
-            
-            return docs
-            
-        except Exception as e:
-            print(f"Error getting column documentation: {e}")
-            return {}
+        dependencies = []
+        
+        for table_path in tables_accessed:
+            # Handle different table path formats
+            if "." in table_path:
+                parts = table_path.split(".")
+                if len(parts) == 2:
+                    # dataset.table format
+                    dependencies.append({
+                        "query_cache_id": cache_id,
+                        "project_id": metadata.get("project_id", "unknown"),
+                        "dataset_id": parts[0],
+                        "table_id": parts[1]
+                    })
+                elif len(parts) == 3:
+                    # project.dataset.table format
+                    dependencies.append({
+                        "query_cache_id": cache_id,
+                        "project_id": parts[0],
+                        "dataset_id": parts[1],
+                        "table_id": parts[2]
+                    })
+        
+        if dependencies:
+            try:
+                self.supabase.table("table_dependencies").insert(dependencies).execute()
+            except Exception as e:
+                print(f"❌ Error inserting table dependencies: {e}")
     
     async def save_query_pattern(
         self, 
@@ -200,21 +221,42 @@ class SupabaseKnowledgeBase:
         success: bool,
         error_message: Optional[str] = None,
         user_id: Optional[str] = None
-    ):
+    ) -> bool:
         """Save query execution pattern for analysis."""
+        if not await self.verify_connection():
+            return False
+            
         try:
-            self.supabase.table("query_history").insert({
-                "user_id": user_id,
+            # Prepare query history data
+            history_data = {
                 "sql_query": sql,
                 "execution_time_ms": execution_stats.get("duration_ms"),
                 "bytes_processed": execution_stats.get("total_bytes_processed"),
                 "success": success,
                 "error_message": error_message,
                 "tables_accessed": tables_accessed
-            }).execute()
+            }
             
+            # Add user_id if provided
+            if user_id:
+                history_data["user_id"] = user_id
+            
+            self.supabase.table("query_history").insert(history_data).execute()
+            
+            return True
+            
+        except APIError as e:
+            print(f"❌ Error saving query pattern: {e}")
+            # Log API error details for debugging
+            if hasattr(e, 'details') and e.details:
+                print(f"API Error details: {e.details}")
+            if hasattr(e, 'hint') and e.hint:
+                print(f"API Error hint: {e.hint}")
+            return False
         except Exception as e:
-            print(f"Error saving query pattern: {e}")
+            print(f"❌ Error saving query pattern: {e}")
+            # Do not access e.details here, as Exception does not have it
+            return False
     
     async def get_query_suggestions(
         self, 
@@ -222,8 +264,10 @@ class SupabaseKnowledgeBase:
         limit: int = 5
     ) -> List[Dict[str, Any]]:
         """Get query template suggestions based on tables mentioned."""
+        if not await self.verify_connection():
+            return []
+            
         try:
-            # This would use more sophisticated matching in a real implementation
             result = self.supabase.table("query_templates").select("*").order(
                 "usage_count", desc=True
             ).limit(limit).execute()
@@ -231,11 +275,13 @@ class SupabaseKnowledgeBase:
             suggestions = []
             for template in result.data:
                 suggestions.append({
+                    "id": template["id"],
                     "name": template["name"],
                     "description": template["description"],
                     "template_sql": template["template_sql"],
                     "parameters": template["parameters"],
-                    "usage_count": template["usage_count"]
+                    "usage_count": template["usage_count"],
+                    "tags": template["tags"]
                 })
             
             return suggestions
@@ -243,3 +289,58 @@ class SupabaseKnowledgeBase:
         except Exception as e:
             print(f"Error getting query suggestions: {e}")
             return []
+    
+    async def get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache performance statistics."""
+        if not await self.verify_connection():
+            return {}
+            
+        try:
+            # Get cache hit/miss statistics
+            total_result = self.supabase.table("query_cache").select("count", count="exact").execute()
+            hit_result = self.supabase.table("query_cache").select("hit_count").execute()
+            
+            total_queries = total_result.count if total_result.count else 0
+            total_hits = sum(row["hit_count"] for row in hit_result.data) if hit_result.data else 0
+            
+            # Get expired cache entries
+            expired_result = self.supabase.table("query_cache").select("count", count="exact").lt(
+                "expires_at", datetime.now().isoformat()
+            ).execute()
+            
+            expired_count = expired_result.count if expired_result.count else 0
+            
+            return {
+                "total_cached_queries": total_queries,
+                "total_cache_hits": total_hits,
+                "expired_entries": expired_count,
+                "hit_rate": (total_hits / max(total_queries, 1)) * 100
+            }
+            
+        except Exception as e:
+            print(f"Error getting cache stats: {e}")
+            return {}
+    
+    async def cleanup_expired_cache(self) -> int:
+        """Manually clean up expired cache entries."""
+        if not await self.verify_connection():
+            return 0
+            
+        try:
+            # Get expired entries
+            expired_result = self.supabase.table("query_cache").select("id").lt(
+                "expires_at", datetime.now().isoformat()
+            ).execute()
+            
+            if expired_result.data:
+                expired_ids = [row["id"] for row in expired_result.data]
+                
+                # Delete expired entries (dependencies will be cascade deleted)
+                self.supabase.table("query_cache").delete().in_("id", expired_ids).execute()
+                
+                return len(expired_ids)
+                
+        except Exception as e:
+            print(f"Error cleaning up expired cache: {e}")
+        
+        return 0
