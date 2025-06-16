@@ -199,25 +199,104 @@ CREATE TABLE user_preferences (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Row Level Security (RLS) Policies
+-- Row Level Security (RLS) Policies for BigQuery Cache Tables
+
+-- First, ensure RLS is enabled on the tables
 ALTER TABLE query_cache ENABLE ROW LEVEL SECURITY;
+ALTER TABLE query_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE table_dependencies ENABLE ROW LEVEL SECURITY;
 ALTER TABLE schema_snapshots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE column_documentation ENABLE ROW LEVEL SECURITY;
-ALTER TABLE query_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE query_templates ENABLE ROW LEVEL SECURITY;
 ALTER TABLE event_log ENABLE ROW LEVEL SECURITY;
-ALTER TABLE user_preferences ENABLE ROW LEVEL SECURITY;
 
--- RLS Policies (customize as needed)
--- CREATE POLICY "Enable read access for authenticated users" ON query_cache
---     FOR SELECT USING (auth.role() = 'authenticated');
+-- Option 1: Allow all operations (least secure, but simplest for development)
+-- Use this during development/testing phases
 
--- CREATE POLICY "Enable all operations for authenticated users" ON query_history
---     FOR ALL USING (auth.role() = 'authenticated');
+-- Allow all operations on query_cache
+CREATE POLICY "Allow all operations on query_cache" ON query_cache
+FOR ALL USING (true) WITH CHECK (true);
 
--- CREATE POLICY "Users can manage their own preferences" ON user_preferences
---     FOR ALL USING (auth.uid()::text = user_id);
+-- Allow all operations on query_history
+CREATE POLICY "Allow all operations on query_history" ON query_history
+FOR ALL USING (true) WITH CHECK (true);
+
+-- Allow all operations on table_dependencies
+CREATE POLICY "Allow all operations on table_dependencies" ON table_dependencies
+FOR ALL USING (true) WITH CHECK (true);
+
+-- Allow all operations on schema_snapshots
+CREATE POLICY "Allow all operations on schema_snapshots" ON schema_snapshots
+FOR ALL USING (true) WITH CHECK (true);
+
+-- Allow all operations on column_documentation
+CREATE POLICY "Allow all operations on column_documentation" ON column_documentation
+FOR ALL USING (true) WITH CHECK (true);
+
+-- Allow all operations on query_templates
+CREATE POLICY "Allow all operations on query_templates" ON query_templates
+FOR ALL USING (true) WITH CHECK (true);
+
+-- Allow all operations on event_log
+CREATE POLICY "Allow all operations on event_log" ON event_log
+FOR ALL USING (true) WITH CHECK (true);
+
+-- Option 2: User-based policies (more secure)
+-- Uncomment and use these instead if you have user authentication
+
+/*
+-- Allow users to manage their own cache entries
+CREATE POLICY "Users can manage own cache entries" ON query_cache
+FOR ALL USING (auth.uid()::text = user_id OR user_id IS NULL);
+
+-- Allow users to manage their own query history
+CREATE POLICY "Users can manage own query history" ON query_history
+FOR ALL USING (auth.uid()::text = user_id OR user_id IS NULL);
+
+-- Allow all operations on system tables (no user-specific data)
+CREATE POLICY "Allow system operations" ON table_dependencies
+FOR ALL USING (true) WITH CHECK (true);
+
+CREATE POLICY "Allow system operations" ON schema_snapshots
+FOR ALL USING (true) WITH CHECK (true);
+
+CREATE POLICY "Allow system operations" ON column_documentation
+FOR ALL USING (true) WITH CHECK (true);
+
+CREATE POLICY "Allow system operations" ON query_templates
+FOR ALL USING (true) WITH CHECK (true);
+
+-- Allow users to create their own event log entries
+CREATE POLICY "Users can create event logs" ON event_log
+FOR INSERT WITH CHECK (auth.uid()::text = user_id OR user_id IS NULL);
+
+CREATE POLICY "Users can read event logs" ON event_log
+FOR SELECT USING (auth.uid()::text = user_id OR user_id IS NULL);
+*/
+
+-- Option 3: Service role policies (for backend services)
+-- If your application uses a service role key, you might want to create
+-- policies that allow the service role to perform all operations
+
+/*
+-- Create a function to check if the current role is the service role
+CREATE OR REPLACE FUNCTION is_service_role()
+RETURNS BOOLEAN AS $$
+BEGIN
+  RETURN current_setting('role') = 'service_role';
+EXCEPTION
+  WHEN others THEN
+    RETURN false;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Service role policies
+CREATE POLICY "Service role can manage query_cache" ON query_cache
+FOR ALL USING (is_service_role()) WITH CHECK (is_service_role());
+
+CREATE POLICY "Service role can manage query_history" ON query_history
+FOR ALL USING (is_service_role()) WITH CHECK (is_service_role());
+*/
 
 -- Triggers for automatic timestamp updates
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -261,6 +340,11 @@ $$ LANGUAGE plpgsql;
 - User preferences and settings
 
 **Row Level Security (RLS)** is enabled for all tables.  
+You can choose from several RLS policy options:
+- **Option 1:** Allow all operations (for development/testing)
+- **Option 2:** User-based policies (recommended for production with authentication)
+- **Option 3:** Service role policies (for backend services)
+
 Customize the RLS policies as needed for your environment.
 
 The server will work without Supabase but with limited functionality.
