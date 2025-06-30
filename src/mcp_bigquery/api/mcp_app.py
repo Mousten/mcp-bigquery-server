@@ -49,11 +49,11 @@ def create_mcp_app(bigquery_client, config, event_manager) -> FastMCP:
                 is_connected = await knowledge_base.verify_connection()
                 _supabase_verified["status"] = bool(is_connected)
                 if is_connected:
-                    logger.info("✅ Supabase connection verified")
+                    logger.info("Supabase connection verified")
                 else:
-                    logger.warning("❌ Supabase connection verification failed")
+                    logger.warning("Supabase connection verification failed")
             except Exception as e:
-                logger.error(f"❌ Supabase initialization error: {e}")
+                logger.error(f"Supabase initialization error: {e}")
                 _supabase_verified["status"] = False
         return _supabase_verified["status"]
 
