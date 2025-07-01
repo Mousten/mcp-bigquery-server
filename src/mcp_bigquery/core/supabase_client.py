@@ -40,10 +40,10 @@ class SupabaseKnowledgeBase:
             # Test connection by checking if query_cache table exists
             result = self.supabase.table("query_cache").select("count", count="exact").limit(1).execute()
             self._connection_verified = True
-            print(f"✅ Supabase connection verified. Using {'service key' if self._use_service_key else 'anon key'}")
+            print(f"Supabase connection verified. Using {'service key' if self._use_service_key else 'anon key'}")
             return True
         except Exception as e:
-            print(f"❌ Supabase connection verification failed: {e}")
+            print(f"Supabase connection verification failed: {e}")
             return False
     
     def _generate_query_hash(self, sql: str, params: Optional[Dict[str, Any]] = None) -> str:
@@ -169,18 +169,18 @@ class SupabaseKnowledgeBase:
                 # Insert table dependencies
                 await self._insert_table_dependencies(cache_id, tables_accessed, metadata)
                 
-                print(f"✅ Cached query result with {len(result_data)} rows, expires at {expires_at}")
+                print(f"Cached query result with {len(result_data)} rows, expires at {expires_at}")
                 return True
                 
         except APIError as e:
-            print(f"❌ Error caching query result: {e}")
+            print(f"Error caching query result: {e}")
             # Log API error details for debugging
             if hasattr(e, 'details') and e.details:
                 print(f"API Error details: {e.details}")
             if hasattr(e, 'hint') and e.hint:
                 print(f"API Error hint: {e.hint}")
         except Exception as e:
-            print(f"❌ Error caching query result: {e}")
+            print(f"Error caching query result: {e}")
         
         return False
     
@@ -221,7 +221,7 @@ class SupabaseKnowledgeBase:
             try:
                 self.supabase.table("table_dependencies").insert(dependencies).execute()
             except Exception as e:
-                print(f"❌ Error inserting table dependencies: {e}")
+                print(f"Error inserting table dependencies: {e}")
     
     async def save_query_pattern(
         self, 
@@ -256,7 +256,7 @@ class SupabaseKnowledgeBase:
             return True
             
         except APIError as e:
-            print(f"❌ Error saving query pattern: {e}")
+            print(f"Error saving query pattern: {e}")
             # Log API error details for debugging
             if hasattr(e, 'details') and e.details:
                 print(f"API Error details: {e.details}")
@@ -264,7 +264,7 @@ class SupabaseKnowledgeBase:
                 print(f"API Error hint: {e.hint}")
             return False
         except Exception as e:
-            print(f"❌ Error saving query pattern: {e}")
+            print(f"Error saving query pattern: {e}")
             # Do not access e.details here, as Exception does not have it
             return False
     
