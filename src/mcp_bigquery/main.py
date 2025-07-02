@@ -56,12 +56,20 @@ def main():
         # Create FastAPI app for HTTP mode
         fastapi_app = create_fastapi_app()
 
+        # Initialize SupabaseKnowledgeBase
+        from .core.supabase_client import SupabaseKnowledgeBase
+        knowledge_base = SupabaseKnowledgeBase(supabase_url=config.supabase_url, supabase_key=config.supabase_key)
+
         # Create and include routers
         resources_router = create_resources_router(bigquery_client, config)
         bigquery_router = create_bigquery_router(bigquery_client, config)
-        tools_router = create_tools_router(bigquery_client, event_manager)
+        tools_router = create_tools_router(bigquery_client, event_manager, knowledge_base)
         events_router = create_events_router(event_manager)
         health_router = create_health_router(event_manager)
+        
+        # Import and create preferences router
+        from .routes.preferences import create_preferences_router
+        preferences_router = create_preferences_router(knowledge_base)
 
         # Include all routers
         fastapi_app.include_router(resources_router)
@@ -69,6 +77,7 @@ def main():
         fastapi_app.include_router(tools_router)
         fastapi_app.include_router(events_router)
         fastapi_app.include_router(health_router)
+        fastapi_app.include_router(preferences_router)
 
         print(f"Starting server in HTTP mode on {args.host}:{args.port}...")
         import uvicorn

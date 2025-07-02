@@ -9,6 +9,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from ai_agent.tool_interface.mcp_tools import MCPTools
 from ai_agent.agent_core.agent_brain import AgentBrain
 from ai_agent.utils.error_handler import handle_mcp_error
+from ai_agent.data_models.preference_models import UserPreferences # Import UserPreferences
 
 async def main_async():
     print("Initializing MCPTools client...")
@@ -38,7 +39,9 @@ async def main_async():
 
     print("\n--- Testing get_user_preferences() (with dummy session_id) ---")
     try:
-        user_prefs = mcp_client.get_user_preferences(session_id="test_session_123")
+        raw_user_prefs = mcp_client.get_user_preferences(session_id="test_session_123")
+        # Convert raw response to UserPreferences object
+        user_prefs = UserPreferences.from_mcp_response(raw_user_prefs, "test_session_123", is_user_id=False)
         print("Successfully retrieved user preferences:")
         print(user_prefs)
     except requests.exceptions.RequestException as e:
@@ -48,8 +51,8 @@ async def main_async():
 
     print("\n--- Testing set_user_preferences() (with dummy session_id) ---")
     try:
-        new_prefs = {"theme": "dark", "default_limit": 500}
-        set_result = mcp_client.set_user_preferences(preferences=new_prefs, session_id="test_session_123")
+        new_prefs_data = {"theme": "dark", "default_limit": 500}
+        set_result = mcp_client.set_user_preferences(preferences=new_prefs_data, session_id="test_session_123")
         print("Successfully set user preferences:")
         print(set_result)
     except requests.exceptions.RequestException as e:
@@ -59,7 +62,8 @@ async def main_async():
 
     print("\n--- Testing get_user_preferences() again to confirm set ---")
     try:
-        user_prefs_confirm = mcp_client.get_user_preferences(session_id="test_session_123")
+        raw_user_prefs_confirm = mcp_client.get_user_preferences(session_id="test_session_123")
+        user_prefs_confirm = UserPreferences.from_mcp_response(raw_user_prefs_confirm, "test_session_123", is_user_id=False)
         print("Successfully retrieved user preferences after setting:")
         print(user_prefs_confirm)
     except requests.exceptions.RequestException as e:

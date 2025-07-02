@@ -1,8 +1,11 @@
 from typing import Dict, Any
+import requests
+import json
+
 from ai_agent.tool_interface.mcp_tools import MCPTools
 from ai_agent.utils.error_handler import handle_mcp_error
 from ai_agent.agent_core.system_message import SYSTEM_MESSAGE
-import requests
+from ai_agent.data_models.query_result import QueryResult # Import QueryResult
 
 class AgentBrain:
     def __init__(self, mcp_client: MCPTools):
@@ -22,7 +25,7 @@ class AgentBrain:
 
         try:
             print("Executing BigQuery SQL via MCP server...")
-            response = self.mcp_client.execute_bigquery_sql(
+            raw_response = self.mcp_client.execute_bigquery_sql(
                 sql=sql_query,
                 user_id=user_id,
                 session_id=session_id,
@@ -31,15 +34,15 @@ class AgentBrain:
                 maximum_bytes_billed=10000000 # 10MB limit for safety
             )
             
-            if response.get("isError", False):
-                error_content = response.get("content", [{}])[0].get("text", "Unknown error")
-                return f"Error executing query: {error_content}"
+            query_result = QueryResult.from_mcp_response(raw_response)
+
+            if query_result.is_error:
+                return f"Error executing query: {query_result.error}"
             
-            result = response.get("content", [{}])[0].get("text", "No content")
-            print(f"Query execution successful. Raw result:\n{result}")
+            print(f"Query execution successful. Raw result:\n{json.dumps(query_result.result, indent=2)}")
 
             # --- Apply Response Formatting Guidelines ---
-            formatted_response = f"Here is the result of your query:\n\n```sql\n{sql_query}\n```\n\n```json\n{result}\n```\n\nKey Insights: The query successfully returned a single row with a test number and a greeting message."
+            formatted_response = f"Here is the result of your query:\n\n```sql\n{sql_query}\n```\n\n```json\n{json.dumps(query_result.result, indent=2)}\n```\n\nKey Insights: The query successfully returned a single row with a test number and a greeting message."
 
             return formatted_response
 

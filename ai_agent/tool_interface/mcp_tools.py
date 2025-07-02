@@ -51,9 +51,8 @@ class MCPTools:
         return self._post("/tools/execute_bigquery_sql", payload)
 
     def get_datasets(self) -> Dict[str, Any]:
-        # If you have a dedicated endpoint, use it. Otherwise, this is just an example:
-        return self._get("/tools/datasets")
-        # If not available, you may need to implement this endpoint on the server.
+        # The MCP server's get_datasets is a GET request to /resources/list
+        return self._get("/resources/list")
 
     def get_tables(self, dataset_id: str) -> Dict[str, Any]:
         # The MCP server's get_tables is a POST request
