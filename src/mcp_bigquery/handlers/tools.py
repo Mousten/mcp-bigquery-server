@@ -26,7 +26,7 @@ async def query_tool_handler(
     bigquery_client,
     event_manager,
     sql: str,
-    maximum_bytes_billed: int = 100000000,
+    maximum_bytes_billed: int = 209715200,
     knowledge_base: Optional[SupabaseKnowledgeBase] = None,
     use_cache: bool = True,
     user_id: Optional[str] = None,

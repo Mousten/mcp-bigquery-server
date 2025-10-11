@@ -18,9 +18,9 @@ def main():
     parser = argparse.ArgumentParser(description="MCP BigQuery Server")
     parser.add_argument(
         "--transport",
-        choices=["http", "stdio", "sse"],
+        choices=["http", "stdio", "sse", "http-stream"],  # added http-stream
         default="http",
-        help="Transport method (http, stdio, or sse)",
+        help="Transport method (http, stdio, sse, or http-stream)",
     )
     parser.add_argument("--port", type=int, default=8000, help="Port for server")
     parser.add_argument("--host", default="0.0.0.0", help="Host for server")
@@ -52,6 +52,63 @@ def main():
         print("Starting server in stdio mode...")
         mcp_app.run(transport="stdio")
     
+    elif args.transport == "http-stream":
+        # Start FastAPI app with a streaming HTTP endpoint
+        fastapi_app = create_fastapi_app()
+
+        # Initialize SupabaseKnowledgeBase
+        from .core.supabase_client import SupabaseKnowledgeBase
+        knowledge_base = SupabaseKnowledgeBase(supabase_url=config.supabase_url, supabase_key=config.supabase_key)
+
+        # Create and include routers (same as regular HTTP)
+        resources_router = create_resources_router(bigquery_client, config)
+        bigquery_router = create_bigquery_router(bigquery_client, config)
+        tools_router = create_tools_router(bigquery_client, event_manager, knowledge_base)
+        events_router = create_events_router(event_manager)
+        health_router = create_health_router(event_manager)
+        
+        # Import and create preferences router
+        from .routes.preferences import create_preferences_router
+        preferences_router = create_preferences_router(knowledge_base)
+
+        # Include all routers under the /stream base so MCP tools are available at /stream
+        fastapi_app.include_router(resources_router, prefix="/stream")
+        fastapi_app.include_router(bigquery_router, prefix="/stream")
+        fastapi_app.include_router(tools_router, prefix="/stream")
+        fastapi_app.include_router(events_router, prefix="/stream")
+        fastapi_app.include_router(health_router, prefix="/stream")
+        fastapi_app.include_router(preferences_router, prefix="/stream")
+
+        # Include a small index at /stream so a GET /stream returns something (helps n8n / browsers)
+        from fastapi import APIRouter
+        index_router = APIRouter(prefix="/stream")
+
+        @index_router.get("/", include_in_schema=False)
+        async def stream_index():
+            return {
+                "message": "MCP tools root",
+                "mcp_base": "/stream",
+                "ndjson_stream": "/stream/ndjson/?channel=system",
+                "docs": "/docs",
+                "openapi": "/openapi.json",
+            }
+
+        fastapi_app.include_router(index_router)
+
+        # Include the HTTP NDJSON stream router (now at /stream/ndjson/)
+        try:
+            from .routes.http_stream import create_http_stream_router
+        except Exception:
+            create_http_stream_router = None
+
+        if create_http_stream_router:
+            stream_router = create_http_stream_router(event_manager)
+            fastapi_app.include_router(stream_router)
+
+        print(f"Starting server in HTTP-STREAM mode on {args.host}:{args.port}...")
+        import uvicorn
+        uvicorn.run(fastapi_app, host=args.host, port=args.port)
+
     else:
         # Create FastAPI app for HTTP mode
         fastapi_app = create_fastapi_app()

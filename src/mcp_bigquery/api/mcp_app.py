@@ -154,7 +154,7 @@ def create_mcp_app(bigquery_client, config, event_manager) -> FastMCP:
     )
     async def execute_bigquery_sql(
         sql: str, 
-        maximum_bytes_billed: int = 100000000,
+        maximum_bytes_billed: int = 209715200,
         use_cache: bool = True,
         user_id: Optional[str] = None,
         force_refresh: bool = False
