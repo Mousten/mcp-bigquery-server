@@ -484,6 +484,35 @@ Once configured, you can interact with your BigQuery data through Claude Desktop
 - "Explain what the customer_events table is used for"
 - "What are the cache statistics?"
 
+## Streamlit AI Analyst App
+
+The repository ships with a Streamlit front-end (`streamlit_app/app.py`) that wraps the MCP BigQuery
+server in an interactive "AI data analyst" experience. It uses an OpenAI model to translate natural
+language questions into safe, read-only BigQuery SQL, executes the query through the MCP server, and
+summarises the results in real time.
+
+### Prerequisites
+
+- A running instance of the MCP BigQuery server (HTTP transport).
+- Python dependencies installed (`uv pip install -e .`).
+- An OpenAI API key available as an environment variable (`OPENAI_API_KEY`) or entered in the UI.
+
+### Running the Streamlit app
+
+```bash
+# Ensure the MCP server is running locally (default assumes http://localhost:8005)
+export OPENAI_API_KEY="sk-..."
+streamlit run streamlit_app/app.py
+```
+
+The sidebar lets you configure the MCP base URL, user/session identifiers, query cost controls and
+the OpenAI model. Selecting a dataset and optional tables shares schema information with the agent to
+improve SQL generation. Ask questions in the chat interface and the assistant will:
+
+1. Propose a BigQuery query plan using the provided metadata and best practices.
+2. Execute the SQL via the MCP server, respecting caching and maximum bytes billed.
+3. Return a Markdown summary, preview table, downloadable CSV and the executed SQL for transparency.
+
 ## API Endpoints
 
 ### Resources
