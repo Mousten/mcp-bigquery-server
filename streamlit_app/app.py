@@ -218,20 +218,110 @@ def initialise_llm_client(provider: LLMProvider, api_key: str) -> Optional[LLMCl
     raise RuntimeError(f"Unsupported LLM provider: {provider}")
 
 
+def _convert_to_gemini_schema(json_schema: Dict[str, Any], types_module: Any) -> Any:
+    """
+    Convert JSON Schema to Gemini Schema format.
+
+    Gemini uses a subset of OpenAPI 3.0 Schema format.
+    https://ai.google.dev/gemini-api/docs/structured-output
+
+    Args:
+        json_schema: Standard JSON schema dict
+        types_module: The google.generativeai.types module
+
+    Returns:
+        Gemini Schema object
+    """
+    # For simple schemas, Gemini can work with a basic Schema object
+    # This is a simplified conversion - full JSON Schema support would be more complex
+    schema_type = json_schema.get("type", "object")
+    properties = json_schema.get("properties", {})
+    required = json_schema.get("required", [])
+
+    # Build Gemini schema properties
+    gemini_properties = {}
+    for prop_name, prop_schema in properties.items():
+        prop_type = prop_schema.get("type", "string")
+        prop_description = prop_schema.get("description", "")
+
+        # Map JSON Schema types to Gemini types
+        type_mapping = {
+            "string": "STRING",
+            "number": "NUMBER",
+            "integer": "INTEGER",
+            "boolean": "BOOLEAN",
+            "array": "ARRAY",
+            "object": "OBJECT",
+        }
+
+        gemini_type = type_mapping.get(prop_type, "STRING")
+
+        # Create property schema
+        if prop_schema.get("type") == "array":
+            item_schema = prop_schema.get("items", {})
+            item_type = item_schema.get("type", "string")
+            gemini_properties[prop_name] = types_module.Schema(
+                type=gemini_type,
+                description=prop_description,
+                items=types_module.Schema(type=type_mapping.get(item_type, "STRING")),
+            )
+        else:
+            gemini_properties[prop_name] = types_module.Schema(
+                type=gemini_type,
+                description=prop_description,
+            )
+
+    # Create the main schema
+    return types_module.Schema(
+        type="OBJECT",
+        properties=gemini_properties,
+        required=required,
+    )
+
+
 def invoke_llm(
     llm_client: LLMClientWrapper,
     model: str,
     messages: List[Dict[str, Any]],
     temperature: float,
+    response_schema: Optional[Dict[str, Any]] = None,
 ) -> str:
+    """
+    Invoke an LLM with optional structured output schema.
+
+    Args:
+        llm_client: Wrapped LLM client
+        model: Model name to use
+        messages: List of message dicts with 'role' and 'content'
+        temperature: Sampling temperature
+        response_schema: Optional JSON schema for structured output
+
+    Returns:
+        String response from the LLM
+    """
     provider = llm_client.provider
 
     if provider is LLMProvider.OPENAI:
-        response = llm_client.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-        )
+        # OpenAI: Use Structured Outputs for guaranteed JSON schema adherence
+        # https://platform.openai.com/docs/guides/structured-outputs
+        create_kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+
+        if response_schema:
+            # Use JSON mode with schema for structured output
+            create_kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "sql_generation_response",
+                    "strict": True,
+                    "schema": response_schema,
+                },
+            }
+
+        response = llm_client.client.chat.completions.create(**create_kwargs)
         if not response.choices:
             raise RuntimeError("OpenAI returned an empty response.")
         content = response.choices[0].message.content
@@ -242,6 +332,9 @@ def invoke_llm(
     system_prompt, conversation = split_system_and_conversation(messages)
 
     if provider is LLMProvider.ANTHROPIC:
+        # Anthropic: Use prefilling for structured JSON output
+        # https://docs.anthropic.com/claude/docs/prefill-claudes-response
+        # https://docs.anthropic.com/claude/docs/control-output-format
         formatted_messages = []
         for message in conversation:
             role = message.get("role")
@@ -254,7 +347,15 @@ def invoke_llm(
                 }
             )
         if not formatted_messages:
-            formatted_messages = [{"role": "user", "content": ""}]
+            raise RuntimeError("No valid messages for Anthropic API")
+
+        # If response_schema is provided, use prefilling to constrain output to JSON
+        if response_schema:
+            # Add assistant message starting with '{' to prefill and constrain to JSON
+            formatted_messages.append({
+                "role": "assistant",
+                "content": "{",
+            })
 
         # NOTE: Anthropic expects 'max_tokens' (not 'max_output_tokens') and a
         # messages list of simple role/content items.
@@ -276,14 +377,19 @@ def invoke_llm(
             if maybe_text:
                 return maybe_text
             raise RuntimeError("Anthropic returned an empty response.")
-        return "\n".join(text_parts)
+
+        response_text = "\n".join(text_parts)
+
+        # If we used prefilling, prepend the '{' back to the response
+        if response_schema:
+            response_text = "{" + response_text
+
+        return response_text
 
     if provider is LLMProvider.GEMINI:
+        # Gemini: Use response_mime_type and response_schema for JSON output
+        # https://ai.google.dev/gemini-api/docs/structured-output
         genai = llm_client.client
-        model_client = genai.GenerativeModel(
-            model_name=model,
-            system_instruction=system_prompt or None,
-        )
 
         contents = []
         for message in conversation:
@@ -302,18 +408,44 @@ def invoke_llm(
             )
 
         if not contents:
-            contents = [{"role": "user", "parts": [{"text": ""}]}]
+            raise RuntimeError("No valid messages for Gemini API")
 
+        # Configure generation settings
         response_kwargs: Dict[str, Any] = {}
         types_module = getattr(genai, "types", None)
         generation_config = None
+
         if types_module and hasattr(types_module, "GenerationConfig"):
+            config_params: Dict[str, Any] = {"temperature": temperature}
+
+            # If response_schema is provided, configure for JSON output
+            if response_schema:
+                config_params["response_mime_type"] = "application/json"
+                # Convert JSON schema to Gemini Schema format if needed
+                # Gemini uses a subset of OpenAPI 3.0 Schema
+                if hasattr(types_module, "Schema"):
+                    try:
+                        # Build Gemini Schema from JSON schema
+                        gemini_schema = _convert_to_gemini_schema(response_schema, types_module)
+                        config_params["response_schema"] = gemini_schema
+                    except Exception as e:
+                        # Fallback: just use JSON mime type without schema
+                        print(f"Warning: Could not convert schema for Gemini: {e}")
+
             try:
+                generation_config = types_module.GenerationConfig(**config_params)
+            except Exception as e:
+                # Fallback without schema if config fails
                 generation_config = types_module.GenerationConfig(temperature=temperature)
-            except Exception:  # pragma: no cover - defensive
-                generation_config = None
+
         if generation_config is not None:
             response_kwargs["generation_config"] = generation_config
+
+        # Create model with system instruction
+        model_client = genai.GenerativeModel(
+            model_name=model,
+            system_instruction=system_prompt or None,
+        )
 
         response = model_client.generate_content(
             contents,
@@ -376,6 +508,11 @@ def generate_sql_plan(
                 "Return a single JSON object that follows the expected schema."
                 " Keep SQL efficient and readable. Always include a LIMIT clause no higher than the requested limit"
                 " unless the user explicitly requests otherwise."
+                "\n\n**CRITICAL RULES:**"
+                "\n1. ALWAYS generate SQL for data questions - use BigQuery Standard SQL syntax"
+                "\n2. For schema/structure questions, query INFORMATION_SCHEMA tables (e.g., `project.dataset.INFORMATION_SCHEMA.COLUMNS WHERE table_name = 'TableName'`)"
+                "\n3. DO NOT suggest using tools or APIs - you must generate SQL directly"
+                "\n4. The 'sql' field in your response should contain the actual SQL query, not suggestions or tool references"
                 "\n\n**IMPORTANT:** When the user refers to 'the table' or 'this table' without specifying a name,"
                 " check the conversation history to identify which table was previously discussed."
                 " Extract the full table reference (project.dataset.table) from previous queries or questions."
@@ -405,8 +542,48 @@ def generate_sql_plan(
     # Add current question with metadata
     messages.append({"role": "user", "content": json.dumps(prompt_payload, indent=2)})
 
-    # Use the provider-agnostic invoke_llm helper so each SDK path is handled correctly
-    content = invoke_llm(llm_client=llm_client, model=model, messages=messages, temperature=0.1)
+    # Define JSON schema for structured output
+    # Note: "sql" is not in required list to allow flexibility across providers
+    # OpenAI's strict mode has issues with nullable/union types
+    response_schema = {
+        "type": "object",
+        "properties": {
+            "sql": {
+                "type": "string",
+                "description": "Read-only BigQuery SQL query to answer the question. ALWAYS generate SQL using BigQuery Standard SQL, even for schema questions (use INFORMATION_SCHEMA). Only omit if truly impossible."
+            },
+            "analysis_steps": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Ordered list of steps describing how the query answers the question"
+            },
+            "assumptions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of assumptions or clarifications made"
+            },
+            "follow_up_questions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional list of follow-up question suggestions for the user"
+            },
+            "confidence": {
+                "type": "number",
+                "description": "Confidence level between 0 and 1 for the analysis"
+            }
+        },
+        "required": ["analysis_steps"],
+        "additionalProperties": False
+    }
+
+    # Use the provider-agnostic invoke_llm helper with structured output
+    content = invoke_llm(
+        llm_client=llm_client,
+        model=model,
+        messages=messages,
+        temperature=0.1,
+        response_schema=response_schema,
+    )
     return parse_json_response(content)
 
 
