@@ -138,7 +138,7 @@ def test_streamlit_app_structure():
     """Test that Streamlit app has proper structure."""
     print_header("Testing Streamlit App Structure")
 
-    with open('streamlit_app/app.py', 'r') as f:
+    with open('streamlit_app/app.py', 'r',encoding='utf-8') as f:
         app_content = f.read()
 
     required_components = {
