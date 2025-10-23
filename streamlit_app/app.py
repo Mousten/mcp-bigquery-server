@@ -339,6 +339,7 @@ def generate_sql_plan(
     question: str,
     metadata: Dict[str, Any],
     row_limit: int,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     prompt_payload = {
         "question": question,
@@ -367,13 +368,36 @@ def generate_sql_plan(
                 "Return a single JSON object that follows the expected schema."
                 " Keep SQL efficient and readable. Always include a LIMIT clause no higher than the requested limit"
                 " unless the user explicitly requests otherwise."
+                "\n\n**IMPORTANT:** When the user refers to 'the table' or 'this table' without specifying a name,"
+                " check the conversation history to identify which table was previously discussed."
+                " Extract the full table reference (project.dataset.table) from previous queries or questions."
             ),
         },
-        {"role": "user", "content": json.dumps(prompt_payload, indent=2)},
     ]
 
-    content = invoke_llm(
-        llm_client=llm_client,
+    # Add conversation history for context, but limit to recent messages to avoid token limits
+    if conversation_history:
+        # Include the last 6 messages (3 exchanges) for context
+        recent_history = conversation_history[-6:]
+        for msg in recent_history:
+            role = msg.get("role")
+            if role == "user":
+                messages.append({"role": "user", "content": msg.get("content", "")})
+            elif role == "assistant":
+                # For assistant messages, include the question context and SQL
+                assistant_context = []
+                if sql := msg.get("sql"):
+                    assistant_context.append(f"Generated SQL:\n{sql}")
+                if analysis := msg.get("analysis_steps"):
+                    if isinstance(analysis, list):
+                        assistant_context.append("Analysis: " + ", ".join(str(s) for s in analysis))
+                if assistant_context:
+                    messages.append({"role": "assistant", "content": "\n\n".join(assistant_context)})
+
+    # Add current question with metadata
+    messages.append({"role": "user", "content": json.dumps(prompt_payload, indent=2)})
+
+    response = llm_client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=0.1,
@@ -447,7 +471,8 @@ def process_question(
     client: MCPTools,
     config: AgentConfig,
     metadata: Dict[str, Any],
-    llm_client: Optional[LLMClientWrapper],
+    llm_client: Optional[OpenAI],
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     plan: Dict[str, Any] = {}
 
@@ -460,7 +485,9 @@ def process_question(
         )
 
     try:
-        plan = generate_sql_plan(llm_client, config.model, question, metadata, config.row_limit)
+        plan = generate_sql_plan(
+            llm_client, config.model, question, metadata, config.row_limit, conversation_history
+        )
     except Exception as exc:
         raise RuntimeError(f"Failed to generate SQL plan: {exc}") from exc
 
@@ -796,6 +823,7 @@ if prompt:
                     config=agent_config,
                     metadata=metadata_payload,
                     llm_client=llm_client,
+                    conversation_history=st.session_state["conversation"],
                 )
             except RuntimeError as exc:
                 message = {"role": "assistant", "error": str(exc), "content": f"❌ {exc}"}
