@@ -63,10 +63,36 @@ def create_tools_router(bigquery_client, event_manager, knowledge_base) -> APIRo
             return JSONResponse(content=result[0], status_code=result[1])
         return result
 
+    @router.post("/get_tables")
+    async def get_tables_post_fastapi(payload: Dict[str, Any] = Body(...)):
+        """Get tables in a dataset (POST version for MCPTools compatibility)."""
+        dataset_id = payload.get("dataset_id")
+        if not dataset_id:
+            return JSONResponse(content={"error": "dataset_id is required"}, status_code=400)
+        result = await get_tables_handler(bigquery_client, dataset_id)
+        if isinstance(result, tuple) and len(result) == 2:
+            return JSONResponse(content=result[0], status_code=result[1])
+        return result
+
     @router.get("/table_schema")
     async def get_table_schema_fastapi(
         dataset_id: str = Query(...), table_id: str = Query(...), include_samples: bool = Query(True)
     ):
+        result = await get_table_schema_handler(bigquery_client, dataset_id, table_id)
+        if isinstance(result, tuple) and len(result) == 2:
+            return JSONResponse(content=result[0], status_code=result[1])
+        return result
+
+    @router.post("/get_table_schema")
+    async def get_table_schema_post_fastapi(payload: Dict[str, Any] = Body(...)):
+        """Get table schema (POST version for MCPTools compatibility)."""
+        dataset_id = payload.get("dataset_id")
+        table_id = payload.get("table_id")
+        if not dataset_id or not table_id:
+            return JSONResponse(
+                content={"error": "dataset_id and table_id are required"},
+                status_code=400
+            )
         result = await get_table_schema_handler(bigquery_client, dataset_id, table_id)
         if isinstance(result, tuple) and len(result) == 2:
             return JSONResponse(content=result[0], status_code=result[1])
