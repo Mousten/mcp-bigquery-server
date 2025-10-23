@@ -241,25 +241,20 @@ def invoke_llm(
             formatted_messages.append(
                 {
                     "role": role,
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": str(message.get("content", "")),
-                        }
-                    ],
+                    "content": str(message.get("content", "")),
                 }
             )
         if not formatted_messages:
-            formatted_messages = [
-                {"role": "user", "content": [{"type": "text", "text": ""}]}
-            ]
+            formatted_messages = [{"role": "user", "content": ""}]
 
+        # NOTE: Anthropic expects 'max_tokens' (not 'max_output_tokens') and a
+        # messages list of simple role/content items.
         response = llm_client.client.messages.create(
             model=model,
-            temperature=temperature,
-            max_output_tokens=4096,
-            system=system_prompt,
             messages=formatted_messages,
+            temperature=temperature,
+            max_tokens=4096,
+            system=system_prompt,
         )
         text_parts = [
             block.text
@@ -267,6 +262,10 @@ def invoke_llm(
             if getattr(block, "type", None) == "text" and getattr(block, "text", None)
         ]
         if not text_parts:
+            # fallback to top-level text attribute if present
+            maybe_text = getattr(response, "text", None)
+            if maybe_text:
+                return maybe_text
             raise RuntimeError("Anthropic returned an empty response.")
         return "\n".join(text_parts)
 
