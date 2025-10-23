@@ -67,8 +67,8 @@ except ValueError:
     DEFAULT_PROVIDER = LLMProvider.OPENAI
 
 PROVIDER_MODEL_DEFAULTS = {
-    LLMProvider.OPENAI: os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-    LLMProvider.ANTHROPIC: os.getenv("ANTHROPIC_MODEL", "claude-3-sonnet-20240229"),
+    LLMProvider.OPENAI: os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
+    LLMProvider.ANTHROPIC: os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
     LLMProvider.GEMINI: os.getenv("GEMINI_MODEL", "gemini-1.5-pro-latest"),
 }
 
