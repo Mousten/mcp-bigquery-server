@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +29,18 @@ from ai_agent.utils.error_handler import handle_mcp_error
 # -----------------------------------------------------------------------------
 
 
+class LLMProvider(str, Enum):
+    OPENAI = "OpenAI"
+    ANTHROPIC = "Anthropic"
+    GEMINI = "Gemini"
+
+
+@dataclass
+class LLMClientWrapper:
+    provider: LLMProvider
+    client: Any
+
+
 @dataclass
 class AgentConfig:
     base_url: str
@@ -37,6 +50,7 @@ class AgentConfig:
     maximum_bytes_billed: int
     row_limit: int
     model: str
+    provider: LLMProvider
 
 
 # -----------------------------------------------------------------------------
@@ -45,7 +59,25 @@ class AgentConfig:
 
 RESULT_PREVIEW_ROWS = 200
 RESULT_DOWNLOAD_ROWS = 1000
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+DEFAULT_PROVIDER_NAME = os.getenv("LLM_PROVIDER", LLMProvider.OPENAI.value)
+try:
+    DEFAULT_PROVIDER = LLMProvider(DEFAULT_PROVIDER_NAME)
+except ValueError:
+    DEFAULT_PROVIDER = LLMProvider.OPENAI
+
+PROVIDER_MODEL_DEFAULTS = {
+    LLMProvider.OPENAI: os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+    LLMProvider.ANTHROPIC: os.getenv("ANTHROPIC_MODEL", "claude-3-sonnet-20240229"),
+    LLMProvider.GEMINI: os.getenv("GEMINI_MODEL", "gemini-1.5-pro-latest"),
+}
+
+PROVIDER_API_KEY_ENV_VARS = {
+    LLMProvider.OPENAI: "OPENAI_API_KEY",
+    LLMProvider.ANTHROPIC: "ANTHROPIC_API_KEY",
+    LLMProvider.GEMINI: "GEMINI_API_KEY",
+}
+
 DEFAULT_BASE_URL = os.getenv("MCP_BIGQUERY_BASE_URL", "http://localhost:8005")
 DEFAULT_SESSION_ID = os.getenv("MCP_SESSION_ID", "streamlit-session")
 DEFAULT_USER_ID = os.getenv("MCP_USER_ID")
@@ -133,15 +165,176 @@ def build_metadata_payload(
     }
 
 
-def initialise_openai_client(api_key: str) -> Optional[OpenAI]:
-    api_key = api_key.strip()
+def split_system_and_conversation(
+    messages: List[Dict[str, Any]],
+) -> tuple[Optional[str], List[Dict[str, Any]]]:
+    system_parts = [
+        str(message.get("content", ""))
+        for message in messages
+        if message.get("role") == "system"
+    ]
+    system_prompt = "\n\n".join(part for part in system_parts if part) or None
+    conversation = [message for message in messages if message.get("role") != "system"]
+    return system_prompt, conversation
+
+
+def initialise_llm_client(provider: LLMProvider, api_key: str) -> Optional[LLMClientWrapper]:
+    api_key = (api_key or "").strip()
     if not api_key:
         return None
-    return OpenAI(api_key=api_key)
+
+    if provider is LLMProvider.OPENAI:
+        return LLMClientWrapper(provider=provider, client=OpenAI(api_key=api_key))
+
+    if provider is LLMProvider.ANTHROPIC:
+        try:
+            from anthropic import Anthropic
+        except ImportError as exc:  # pragma: no cover - dependency guard
+            raise RuntimeError(
+                "Anthropic client library is not installed. Please add the 'anthropic' dependency."
+            ) from exc
+        return LLMClientWrapper(provider=provider, client=Anthropic(api_key=api_key))
+
+    if provider is LLMProvider.GEMINI:
+        try:
+            import google.generativeai as genai
+        except ImportError as exc:  # pragma: no cover - dependency guard
+            raise RuntimeError(
+                "Google Generative AI client library is not installed."
+                " Please add the 'google-generativeai' dependency."
+            ) from exc
+        genai.configure(api_key=api_key)
+        return LLMClientWrapper(provider=provider, client=genai)
+
+    raise RuntimeError(f"Unsupported LLM provider: {provider}")
+
+
+def invoke_llm(
+    llm_client: LLMClientWrapper,
+    model: str,
+    messages: List[Dict[str, Any]],
+    temperature: float,
+) -> str:
+    provider = llm_client.provider
+
+    if provider is LLMProvider.OPENAI:
+        response = llm_client.client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+        )
+        if not response.choices:
+            raise RuntimeError("OpenAI returned an empty response.")
+        content = response.choices[0].message.content
+        if not content:
+            raise RuntimeError("OpenAI returned an empty response.")
+        return content
+
+    system_prompt, conversation = split_system_and_conversation(messages)
+
+    if provider is LLMProvider.ANTHROPIC:
+        formatted_messages = []
+        for message in conversation:
+            role = message.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            formatted_messages.append(
+                {
+                    "role": role,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": str(message.get("content", "")),
+                        }
+                    ],
+                }
+            )
+        if not formatted_messages:
+            formatted_messages = [
+                {"role": "user", "content": [{"type": "text", "text": ""}]}
+            ]
+
+        response = llm_client.client.messages.create(
+            model=model,
+            temperature=temperature,
+            max_output_tokens=4096,
+            system=system_prompt,
+            messages=formatted_messages,
+        )
+        text_parts = [
+            block.text
+            for block in getattr(response, "content", [])
+            if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+        ]
+        if not text_parts:
+            raise RuntimeError("Anthropic returned an empty response.")
+        return "\n".join(text_parts)
+
+    if provider is LLMProvider.GEMINI:
+        genai = llm_client.client
+        model_client = genai.GenerativeModel(
+            model_name=model,
+            system_instruction=system_prompt or None,
+        )
+
+        contents = []
+        for message in conversation:
+            role = message.get("role")
+            if role == "user":
+                gemini_role = "user"
+            elif role == "assistant":
+                gemini_role = "model"
+            else:
+                continue
+            contents.append(
+                {
+                    "role": gemini_role,
+                    "parts": [{"text": str(message.get("content", ""))}],
+                }
+            )
+
+        if not contents:
+            contents = [{"role": "user", "parts": [{"text": ""}]}]
+
+        response_kwargs: Dict[str, Any] = {}
+        types_module = getattr(genai, "types", None)
+        generation_config = None
+        if types_module and hasattr(types_module, "GenerationConfig"):
+            try:
+                generation_config = types_module.GenerationConfig(temperature=temperature)
+            except Exception:  # pragma: no cover - defensive
+                generation_config = None
+        if generation_config is not None:
+            response_kwargs["generation_config"] = generation_config
+
+        response = model_client.generate_content(
+            contents,
+            **response_kwargs,
+        )
+        text = getattr(response, "text", None)
+        if text:
+            return text
+
+        candidates = getattr(response, "candidates", None) or []
+        text_parts: List[str] = []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", None) if content else None
+            if not parts:
+                continue
+            for part in parts:
+                if getattr(part, "text", None):
+                    text_parts.append(part.text)
+        if text_parts:
+            return "\n".join(text_parts)
+
+        raise RuntimeError("Gemini returned an empty response.")
+
+    raise RuntimeError(f"Unsupported LLM provider: {provider}")
 
 
 def generate_sql_plan(
-    llm_client: OpenAI,
+    llm_client: LLMClientWrapper,
     model: str,
     question: str,
     metadata: Dict[str, Any],
@@ -208,8 +401,7 @@ def generate_sql_plan(
         model=model,
         messages=messages,
         temperature=0.1,
-    )
-    content = response.choices[0].message.content or ""
+    ).strip()
     return parse_json_response(content)
 
 
@@ -231,7 +423,7 @@ def basic_summary(question: str, result_preview: List[Dict[str, Any]]) -> str:
 
 
 def generate_summary(
-    llm_client: OpenAI,
+    llm_client: LLMClientWrapper,
     model: str,
     question: str,
     sql: str,
@@ -265,12 +457,13 @@ def generate_summary(
         },
     ]
 
-    response = llm_client.chat.completions.create(
+    content = invoke_llm(
+        llm_client=llm_client,
         model=model,
         messages=messages,
         temperature=0.2,
     )
-    return (response.choices[0].message.content or "").strip()
+    return content.strip()
 
 
 def process_question(
@@ -284,7 +477,12 @@ def process_question(
     plan: Dict[str, Any] = {}
 
     if not llm_client:
-        raise RuntimeError("An OpenAI API key is required to generate SQL and summaries.")
+        raise RuntimeError(
+            (
+                f"The {config.provider.value} client is not initialised."
+                " Provide a valid API key and ensure the SDK is installed."
+            )
+        )
 
     try:
         plan = generate_sql_plan(
@@ -456,11 +654,29 @@ st.caption(
 )
 
 st.sidebar.header("Agent configuration")
-openai_api_key = st.sidebar.text_input(
-    "OpenAI API key",
-    value=os.getenv("OPENAI_API_KEY", ""),
+provider_options = list(LLMProvider)
+default_provider_index = 0
+if DEFAULT_PROVIDER in provider_options:
+    default_provider_index = provider_options.index(DEFAULT_PROVIDER)
+selected_provider = st.sidebar.selectbox(
+    "LLM provider",
+    options=provider_options,
+    index=default_provider_index,
+    format_func=lambda option: option.value,
+)
+
+api_key_env_var = PROVIDER_API_KEY_ENV_VARS.get(selected_provider, "OPENAI_API_KEY")
+api_key_label = f"{selected_provider.value} API key"
+api_key_help = (
+    f"Required for using {selected_provider.value} to translate questions into SQL"
+    " and to summarise results."
+)
+provider_api_key = st.sidebar.text_input(
+    api_key_label,
+    value=os.getenv(api_key_env_var, ""),
     type="password",
-    help="Required for translating questions into SQL and summarising results.",
+    help=api_key_help,
+    key=f"{selected_provider.value.lower()}-api-key",
 )
 
 base_url_input = st.sidebar.text_input(
@@ -479,7 +695,16 @@ maximum_bytes = st.sidebar.number_input(
     help="Protects against expensive scans. Increase if your queries legitimately need more data.",
 )
 
-model_name = st.sidebar.text_input("OpenAI model", value=DEFAULT_MODEL, help="Model used for SQL planning and summarisation.")
+model_default = PROVIDER_MODEL_DEFAULTS.get(selected_provider, "")
+model_label = f"{selected_provider.value} model"
+model_help = f"{selected_provider.value} model used for SQL planning and summaries."
+model_name = st.sidebar.text_input(
+    model_label,
+    value=model_default,
+    help=model_help,
+    key=f"{selected_provider.value.lower()}-model",
+)
+
 user_id_input = st.sidebar.text_input("User ID (optional)", value=DEFAULT_USER_ID or "")
 session_id_input = st.sidebar.text_input("Session ID", value=DEFAULT_SESSION_ID)
 
@@ -492,6 +717,7 @@ agent_config = AgentConfig(
     maximum_bytes_billed=maximum_bytes,
     row_limit=row_limit,
     model=model_name,
+    provider=selected_provider,
 )
 
 client = MCPTools(base_url=agent_config.base_url)
@@ -553,10 +779,20 @@ else:
         st.sidebar.info("No datasets available or the MCP server is unreachable.")
 
 metadata_payload = build_metadata_payload(datasets, selected_dataset, table_schemas)
-llm_client = initialise_openai_client(openai_api_key)
-if llm_client is None:
-    st.sidebar.warning("Enter a valid OpenAI API key to enable SQL planning and summaries.")
-    st.info("Add your OpenAI API key in the sidebar to activate the AI analyst.")
+llm_client_error: Optional[str] = None
+llm_client: Optional[LLMClientWrapper] = None
+try:
+    llm_client = initialise_llm_client(selected_provider, provider_api_key)
+except RuntimeError as exc:  # pragma: no cover - dependency guard
+    llm_client_error = str(exc)
+
+if llm_client_error:
+    st.sidebar.error(llm_client_error)
+elif llm_client is None:
+    st.sidebar.warning(
+        f"Provide a valid {selected_provider.value} API key to enable SQL planning and summaries."
+    )
+    st.info(f"Add a {selected_provider.value} API key in the sidebar to activate the AI analyst.")
 
 if "conversation" not in st.session_state:
     st.session_state["conversation"] = []
