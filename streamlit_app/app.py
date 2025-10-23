@@ -11,8 +11,13 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
-from openai import OpenAI
 from requests.exceptions import RequestException
+
+# Conditional imports for LLM providers
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None  # type: ignore
 
 # Ensure the repository root is on the Python path so we can import ai_agent modules
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -68,8 +73,8 @@ except ValueError:
 
 PROVIDER_MODEL_DEFAULTS = {
     LLMProvider.OPENAI: os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
-    LLMProvider.ANTHROPIC: os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
-    LLMProvider.GEMINI: os.getenv("GEMINI_MODEL", "gemini-1.5-pro-latest"),
+    LLMProvider.ANTHROPIC: os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
+    LLMProvider.GEMINI: os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
 }
 
 PROVIDER_API_KEY_ENV_VARS = {
@@ -184,6 +189,10 @@ def initialise_llm_client(provider: LLMProvider, api_key: str) -> Optional[LLMCl
         return None
 
     if provider is LLMProvider.OPENAI:
+        if OpenAI is None:
+            raise RuntimeError(
+                "OpenAI client library is not installed. Please add the 'openai' dependency."
+            )
         return LLMClientWrapper(provider=provider, client=OpenAI(api_key=api_key))
 
     if provider is LLMProvider.ANTHROPIC:
