@@ -397,11 +397,8 @@ def generate_sql_plan(
     # Add current question with metadata
     messages.append({"role": "user", "content": json.dumps(prompt_payload, indent=2)})
 
-    response = llm_client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.1,
-    ).strip()
+    # Use the provider-agnostic invoke_llm helper so each SDK path is handled correctly
+    content = invoke_llm(llm_client=llm_client, model=model, messages=messages, temperature=0.1)
     return parse_json_response(content)
 
 
@@ -471,7 +468,7 @@ def process_question(
     client: MCPTools,
     config: AgentConfig,
     metadata: Dict[str, Any],
-    llm_client: Optional[OpenAI],
+    llm_client: Optional[LLMClientWrapper],
     conversation_history: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     plan: Dict[str, Any] = {}
